@@ -51,14 +51,34 @@ def tvheadend_get(url):
     return json.loads(req.text)
 
 
+tvc_hash={}
+def clean_name(name):
+    global tvc_hash
+    out=""
+    for x in name.upper():
+        if x>='A' and x<='Z':
+            out=out+x
+        if x>='0' and x<='9':
+            out=out+x
+        if x==' ':
+            out=out+'_'
+    if len(out)<2:
+        out="INVALID"
+    if out in tvc_hash:
+        tvc_hash[out]=tvc_hash[out]+1
+        out=out+"-"+str(tvc_hash[out])
+    else:
+        tvc_hash[out]=1
+    return out
+
 class TVChannel:
     def __init__(self, name, tags,tvh_uuid):
         self.name=name
         self.tags=tags
         self.tvh_uuid=tvh_uuid
-        self.hls_uuid=tvh_uuid
+        self.hls_uuid=clean_name(name)
         self.tvh_url=tvh_base_url_auth+"stream/channel/"+tvh_uuid
-        self.m3u8_file=config["local_http_path"]+"/"+tvh_uuid+".m3u8"
+        self.m3u8_file=config["local_http_path"]+"/"+self.hls_uuid+".m3u8"
         self.stream=None
         self.last_used=time.time()
     def start_stream(self):
@@ -160,7 +180,7 @@ async def read_root():
     for service in channel_list:
         name=service.name
         tags=service.tags
-        uuid=service.tvh_uuid
+        uuid=service.hls_uuid
         data=data+'<tr><td><a href="stream?uuid='+html.escape(uuid)+'">'+html.escape(name)+'</a></td><td>'+html.escape(tags)+'</td></tr>'
     data=data+"</table>"
     data=data+"</body></html>"
@@ -187,7 +207,7 @@ async def read_m3u8(uuid: str=""):
 
 
 def player_page(uri: str="", name: str=""):
-    data="<html><head><title>%s</title></head>"
+    data="<html><head><title>%s</title></head>"%html.escape(name)
     data=data+"<body>"
     data=data+'<script src="//cdn.jsdelivr.net/npm/hls.js@1"></script>'
     data=data+'''
