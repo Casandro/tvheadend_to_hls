@@ -17,8 +17,8 @@ import re
 config={}
 config["tvheadend_ip"]="192.168.5.5"
 config["tvheadend_port"]="9981"
-config["tvheadend_user"]="teletext"
-config["tvheadend_pass"]="teletext"
+config["tvheadend_user"]="user"
+config["tvheadend_pass"]="pass"
 config["local_port"]=8888
 config["local_http_path"]="/tmp/http"
 config["static_http_path"]="/static"
@@ -27,10 +27,9 @@ for setting in ("tvheadend_ip", "tvheadend_port", "tvheadend_user", "tvheadend_p
     if setting in os.environ:
         config[setting]=os.environ[setting]
 
-
-
-stream_ffmpeg = {}
-stream_lastused = {}
+if not os.path.isdir(config["local_http_path"]):
+    print("local_http_path '%s' is not a directory" % config["local_http_path"])
+    exit()
 
 
 tvh_base_url="http://"+config["tvheadend_ip"]+":"+config["tvheadend_port"]+"/"
@@ -58,18 +57,20 @@ class TVChannel:
         self.tags=tags
         self.tvh_uuid=tvh_uuid
         self.hls_uuid=tvh_uuid
-        self.m3u8_file=config["local_http_path"]+"/"+uuid+".m3u8"
+        self.tvh_url=tvh_base_url_auth+"stream/channel/"+tvh_uuid
+        self.m3u8_file=config["local_http_path"]+"/"+tvh_uuid+".m3u8"
         self.stream=None
         self.last_used=time.time()
-    def run_stream:
+    def start_stream(self):
+        self.last_used=time.time()
         if self.stream:
-            if os.file.exists(self.m3u8_file):
+            if os.path.isfile(self.m3u8_file):
                 return "stream.m3u8?uuid="+self.hls_uuid
-            #FIXME: Check if ffmpeg is still running
-            return False
+            else:
+                if self.stream.poll() is None:
+                    return False
         #Start stream
-        url=tvh_base_url_auth+"stream/channel/"+uuid
-        self.stream=subprocess.Popen(["/usr/bin/ffmpeg", "-i", "cache:"+url, 
+        self.stream=subprocess.Popen(["/usr/bin/ffmpeg", "-i", "cache:"+self.tvh_url, 
             "-f", "hls", "-g", "50", 
             "-preset", "fast", 
             "-c:v", "libx264", "-b:v", "2M", 
@@ -78,10 +79,18 @@ class TVChannel:
             "-r", "25", "-sn",
             "-hls_flags", "delete_segments",
             "-hls_list_size", "100",
-            "-hls_time", "2", "-hls_playlist_type", "event",self.m3u8_file])
+            "-hls_time", "2", "-hls_playlist_type", "event",self.m3u8_file], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
         self.last_used=time.time()
         return False
-
+    def clean_stream(self):
+        stream_path_base=config["local_http_path"]
+        files=os.listdir(stream_path_base)
+        for f in files:
+            if f.startswith(f):
+                print("clean_stream: erasing file %s" % (f))
+                os.remove(stream_path_base+"/"+f)
+        self.stream=None
+        return True
 
 
 def tvhedend_get_tv_channellist():
@@ -140,15 +149,6 @@ channel_hash={}
         
 print("%s channels for TV services" % len(channel_list))
 
-check_uuid_pattern=re.compile("^[0-9a-z]{32}$")
-
-def check_uuid(uuid=""):
-    print("check_uuid %s"%(uuid))
-    if not check_uuid_pattern.match(uuid):
-        return False
-    return uuid in channel_hash
-
-
 app = FastAPI()
 
 @app.get("/")
@@ -168,55 +168,26 @@ async def read_root():
 
 @app.get("stream.m3u8")
 async def read_m3u8(uuid: str=""):
-    if not uuid in uuid_valid or not check_uuid(uuid):
+    if not uuid in channel_hash:
         return Response(content="NIX", media_type="text/plain;charset=utf-8")
-    global stream_ffmpeg
-    global stream_lastused
-    if (not uuid in stream_ffmpeg) or (not uuid in stream_lastused):
+    channel=channel_hash[uuid]
+    res=channel.start_stream()
+    if (res==False):
         return Response(content="NIX", media_type="text/plain;charset=utf-8")
+
     data=""
-    m3u8=open(stream_path_base+"/"+uuid+".m3u8", "r")
+    m3u8=open(channel.m3u8_file , "r")
     for line in m3u8.readlines():
         if line[0]=="#":
             data=data+line
         else:
-            data=data+stream_url_base+line
+            data=data+config["static_http_path"]+line
 
-    stream_lastused[uuid]=time.time()
     return Response(content=data, media_type="text/plain;charset=utf-8")
 
-def clean_stream(uuid: str=""):
-    print("clean_stream: %s" % (uuid))
-    files=os.listdir(stream_path_base)
-    for f in files:
-        if f.startswith(f):
-            print("clean_stream: erasing file %s" % (f))
-            os.remove(stream_path_base+"/"+f)
 
-def start_stream(uuid: str=""):
-    global stream_ffmpeg
-    global stream_last_used
-    if not uuid in uuid_valid or not check_uuid(uuid):
-        return Response(content="NIX", media_type="text/plain;charset=utf-8")
-    if not (uuid in stream_ffmpeg):
-        clean_stream(uuid)
-        url=tvh_base_url_auth+"stream/channel/"+uuid
-        stream_ffmpeg[uuid]=subprocess.Popen(["/usr/bin/ffmpeg", "-i", "cache:"+url, 
-            "-f", "hls", "-g", "50", 
-            "-preset", "fast", 
-            "-c:v", "libx264", "-b:v", "2M", 
-            "-c:a", "aac", "-b:a", "96k",
-            "-filter:v", "scale=720:576",
-            "-r", "25", "-sn",
-            "-hls_flags", "delete_segments",
-            "-hls_list_size", "100",
-            "-hls_time", "2", "-hls_playlist_type", "event",stream_path_base+"/"+uuid+".m3u8"])
-        stream_lastused[uuid]=time.time()
-
-
-def player_page(uuid: str=""):
-    uri=playlist_url_base+"?uuid="+uuid
-    data="<html><head><title>%s</title></head>"%(html.escape(uuid_valid[uuid]))
+def player_page(uri: str="", name: str=""):
+    data="<html><head><title>%s</title></head>"
     data=data+"<body>"
     data=data+'<script src="//cdn.jsdelivr.net/npm/hls.js@1"></script>'
     data=data+'''
@@ -246,47 +217,41 @@ def player_page(uuid: str=""):
         });
       }
     </script>
-''' % (html.escape(uuid_valid[uuid]),uri,uri)
+''' % (html.escape(name),uri,uri)
     data=data+'<br><a href="%s">URL for use with VLC</a>'%(uri)
     data=data+"</body>"
 
     return Response(content=data, media_type="text/html;charset=utf-8")
 
 
-@app.get("stream")
+@app.get("/stream")
 async def read_stream(uuid: str=""):
-    if not uuid in uuid_valid or not check_uuid(uuid):
+    if not uuid in channel_hash:
         return Response(content="NIX", media_type="text/plain;charset=utf-8")
-    global stream_ffmpeg
-    global stream_last_used
-    start_stream(uuid)
-    
-    if os.path.exists(stream_path_base+"/"+uuid+".m3u8"):
-        return player_page(uuid)
-
+    channel=channel_hash[uuid]
+    res=channel.start_stream()
+    if res:
+        return player_page(res, channel.name)
     data='<html><head><title>Bitte warten</title><meta http-equiv="refresh" content="5"></head>'
     data=data+"<body>"
     data=data+"Bitte warten, Stream startet"
-    data=data+"</body>"
+    data=data+"</body></html>"
     return Response(content=data, media_type="text/html;charset=utf-8")
 
 def check_status():
     global main_thread
     global stream_ffmpeg
     while main_thread.is_alive():
-        for uuid in stream_lastused:
-            if not uuid in stream_ffmpeg:
+        for channel in channel_list:
+            if channel.stream is None:
                 continue
-            age=time.time()-stream_lastused[uuid]
-            if (age>60):
-                stream_ffmpeg[uuid].kill()
+            age=time.time()-channel.last_used
+            if (age>90):
+                channel.stream.kill()
                 time.sleep(1)
-            if stream_ffmpeg[uuid].poll() is None:
+            if channel.stream.poll() is None:
                 continue
-            clean_stream(uuid)
-            stream_ffmpeg.pop(uuid)
-            stream_lastused.pop(uuid)
-            break
+            channel.clean_stream()
         time.sleep(1)
 
 if __name__ == "__main__":
