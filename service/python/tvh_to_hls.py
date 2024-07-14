@@ -91,7 +91,7 @@ class TVChannel:
                 if self.stream.poll() is None:
                     return False
         #Start stream
-        self.stream=subprocess.Popen(["/usr/bin/ffmpeg", "-i", "cache:"+self.tvh_url, 
+        self.stream=subprocess.Popen(["/usr/bin/ffmpeg", "-i", self.tvh_url, "-probesize", "100000",
             "-f", "hls", "-g", "50", 
             "-preset", "fast", 
             "-c:v", "libx264", "-b:v", "2M", 
