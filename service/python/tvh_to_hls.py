@@ -81,6 +81,7 @@ class TVChannel:
         self.m3u8_file=config["local_http_path"]+"/"+self.hls_uuid+".m3u8"
         self.stream=None
         self.last_used=time.time()
+        self.clean_stream()
     def start_stream(self):
         self.last_used=time.time()
         if self.stream:
@@ -106,7 +107,7 @@ class TVChannel:
         stream_path_base=config["local_http_path"]
         files=os.listdir(stream_path_base)
         for f in files:
-            if f.startswith(f):
+            if f.startswith(self.hls_uuid):
                 print("clean_stream: erasing file %s" % (f))
                 os.remove(stream_path_base+"/"+f)
         self.stream=None
