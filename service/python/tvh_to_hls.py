@@ -1,10 +1,7 @@
-#!/usr/bin/env python3
-import pathlib
-
+#!/usr/bin/python3
 import uvicorn
 import os
 from fastapi import FastAPI, Response
-from fastapi.staticfiles import StaticFiles
 import requests
 from requests.auth import HTTPDigestAuth
 import time
@@ -18,22 +15,20 @@ import re
 
 #Read settings
 config={}
-config["tvheadend_ip"]="192.168.0.191"
+config["tvheadend_ip"]="192.168.5.5"
 config["tvheadend_port"]="9981"
 config["tvheadend_user"]="user"
 config["tvheadend_pass"]="pass"
 config["local_port"]=8888
-config["hls_local_path"]="/tmp/tvhtohls"
-config["hls_http_path"]="/hls/"
-config["static_local_path"]=pathlib.Path(__file__).parent / 'static'
-config["static_http_path"]="/static/"
+config["local_http_path"]="/tmp/http"
+config["static_http_path"]="/static"
 
-for setting in config.keys():
+for setting in ("tvheadend_ip", "tvheadend_port", "tvheadend_user", "tvheadend_pass", "local_port", "local_http_path", "static_http_path"):
     if setting in os.environ:
         config[setting]=os.environ[setting]
 
-if not os.path.isdir(config["hls_local_path"]):
-    print("hls_local_path '%s' is not a directory" % config["hls_local_path"])
+if not os.path.isdir(config["local_http_path"]):
+    print("local_http_path '%s' is not a directory" % config["local_http_path"])
     exit()
 
 
@@ -83,7 +78,7 @@ class TVChannel:
         self.tvh_uuid=tvh_uuid
         self.hls_uuid=clean_name(name)
         self.tvh_url=tvh_base_url_auth+"stream/channel/"+tvh_uuid
-        self.m3u8_file=config["hls_local_path"]+"/"+self.hls_uuid+".m3u8"
+        self.m3u8_file=config["local_http_path"]+"/"+self.hls_uuid+".m3u8"
         self.stream=None
         self.last_used=time.time()
         self.clean_stream()
@@ -109,7 +104,7 @@ class TVChannel:
         self.last_used=time.time()
         return False
     def clean_stream(self):
-        stream_path_base=config["hls_local_path"]
+        stream_path_base=config["local_http_path"]
         files=os.listdir(stream_path_base)
         for f in files:
             if f.startswith(self.hls_uuid):
@@ -207,7 +202,7 @@ async def read_m3u8(uuid: str=""):
         if line[0]=="#":
             data=data+line
         else:
-            data=data+config["hls_http_path"]+line
+            data=data+config["static_http_path"]+line
 
     return Response(content=data, media_type="text/plain;charset=utf-8")
 
@@ -215,7 +210,7 @@ async def read_m3u8(uuid: str=""):
 def player_page(uri: str="", name: str=""):
     data="<html><head><title>%s</title></head>"%html.escape(name)
     data=data+"<body>"
-    data=data+'<script src="'+config["static_http_path"]+'hls.js"></script>'
+    data=data+'<script src="'+config["static_http_path"]+'hls/hls.js"></script>'
     data=data+'''
     <center>
       <h1>%s</h1>
@@ -264,13 +259,6 @@ async def read_stream(uuid: str=""):
     data=data+"</body></html>"
     return Response(content=data, media_type="text/html;charset=utf-8")
 
-
-# for really static files, such as javascript, images etc
-app.mount(config["static_http_path"], StaticFiles(directory=config["static_local_path"]), name="static")
-# HLS stream files which are dynamically generated
-app.mount(config["hls_http_path"], StaticFiles(directory=config["hls_local_path"]), name="hls")
-
-
 def check_status():
     global main_thread
     global stream_ffmpeg
@@ -287,9 +275,7 @@ def check_status():
             channel.clean_stream()
         time.sleep(1)
 
-
-def main():
-    global main_thread, end_program
+if __name__ == "__main__":
     main_thread=threading.currentThread()
     x=threading.Thread(target=check_status, args=[])
     x.start()
@@ -298,6 +284,6 @@ def main():
     end_program=1
 
 
-if __name__ == "__main__":
-    main()
+
+
 
