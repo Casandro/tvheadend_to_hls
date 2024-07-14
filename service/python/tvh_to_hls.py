@@ -181,12 +181,12 @@ async def read_root():
         name=service.name
         tags=service.tags
         uuid=service.hls_uuid
-        data=data+'<tr><td><a href="stream?uuid='+html.escape(uuid)+'">'+html.escape(name)+'</a></td><td>'+html.escape(tags)+'</td></tr>'
+        data=data+'<tr><td><a href="stream?uuid='+html.escape(uuid)+'">'+html.escape(name)+' rel="nofollow"</a></td><td>'+html.escape(tags)+'</td></tr>'
     data=data+"</table>"
     data=data+"</body></html>"
     return Response(content=data, media_type="text/html;charset=utf-8")
 
-@app.get("stream.m3u8")
+@app.get("/stream.m3u8")
 async def read_m3u8(uuid: str=""):
     if not uuid in channel_hash:
         return Response(content="NIX", media_type="text/plain;charset=utf-8")
@@ -209,11 +209,11 @@ async def read_m3u8(uuid: str=""):
 def player_page(uri: str="", name: str=""):
     data="<html><head><title>%s</title></head>"%html.escape(name)
     data=data+"<body>"
-    data=data+'<script src="//cdn.jsdelivr.net/npm/hls.js@1"></script>'
+    data=data+'<script src="'+config["static_http_path"]+'hls/hls.js"></script>'
     data=data+'''
     <center>
       <h1>%s</h1>
-      <video height="576" id="video" controls></video>
+      <video width="100%%" id="video" controls></video>
     </center>
 
     <script>

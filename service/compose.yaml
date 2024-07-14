@@ -1,0 +1,5 @@
+services:
+  hls:
+    build: .
+    ports:
+      - "80:80"
