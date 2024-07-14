@@ -180,16 +180,22 @@ print("%s channels for TV services" % len(channel_list))
 app = FastAPI()
 
 @app.get("/")
-async def read_root():
+async def read_root(s: str="", d: str="i"):
+    if not s in ("name", "number"):
+        s=config["sort"]
+    cl_sorted=sorted(channel_list, key=lambda x: getattr(x, s), reverse=(d=='d'))
     data="<html><head><title>Channels</title></head>"
     data=data+"<body>"
     data=data+"<table>"
-    data=data+'<tr><th scope="col">Name</th><th scope="col">Tags</th> </tr>'
-    for service in channel_list:
+    data=data+'<tr><th scope="col"><a href="?s=number">▲</a><a href="?s=number&d=d">▼</a></th><th scope="col">Name <a href="?s=namer">▲</a><a href="?s=name&d=d">▼</a></th></th><th scope="col">Tags</th> </tr>'
+    for service in cl_sorted:
         name=service.name
         tags=service.tags
         uuid=service.hls_uuid
-        data=data+'<tr><td><a href="stream?uuid='+html.escape(uuid)+'" rel="nofollow">'+html.escape(name)+'</a></td><td>'+html.escape(tags)+'</td></tr>'
+        number=str(service.number)
+        if number=="0":
+            number=""
+        data=data+'<tr><td>'+html.escape(number)+'</td><td><a href="stream?uuid='+html.escape(uuid)+'" rel="nofollow">'+html.escape(name)+'</a></td><td>'+html.escape(tags)+'</td></tr>'
     data=data+"</table>"
     data=data+"</body></html>"
     return Response(content=data, media_type="text/html;charset=utf-8")
