@@ -182,7 +182,7 @@ async def read_root():
         name=service.name
         tags=service.tags
         uuid=service.hls_uuid
-        data=data+'<tr><td><a href="stream?uuid='+html.escape(uuid)+'">'+html.escape(name)+' rel="nofollow"</a></td><td>'+html.escape(tags)+'</td></tr>'
+        data=data+'<tr><td><a href="stream?uuid='+html.escape(uuid)+'" rel="nofollow">'+html.escape(name)+'</a></td><td>'+html.escape(tags)+'</td></tr>'
     data=data+"</table>"
     data=data+"</body></html>"
     return Response(content=data, media_type="text/html;charset=utf-8")
@@ -253,7 +253,7 @@ async def read_stream(uuid: str=""):
     res=channel.start_stream()
     if res:
         return player_page(res, channel.name)
-    data='<html><head><title>Bitte warten</title><meta http-equiv="refresh" content="5"></head>'
+    data='<html><head><title>Bitte warten</title><meta http-equiv="refresh" content="1"></head>'
     data=data+"<body>"
     data=data+"Bitte warten, Stream startet"
     data=data+"</body></html>"
@@ -267,7 +267,7 @@ def check_status():
             if channel.stream is None:
                 continue
             age=time.time()-channel.last_used
-            if (age>90):
+            if (age>30):
                 channel.stream.kill()
                 time.sleep(1)
             if channel.stream.poll() is None:
