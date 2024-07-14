@@ -27,6 +27,7 @@ config["hls_local_path"]="/tmp/tvhtohls/hls"
 config["hls_http_path"]="/hls/"
 config["static_local_path"]=pathlib.Path(__file__).parent / 'static'
 config["static_http_path"]="/static/"
+config["sort"]="name" # or "number"
 
 for setting in config.keys():
     if setting in os.environ:
@@ -77,9 +78,10 @@ def clean_name(name):
     return out
 
 class TVChannel:
-    def __init__(self, name, tags,tvh_uuid):
+    def __init__(self, name, tags, number, tvh_uuid):
         self.name=name
         self.tags=tags
+        self.number=number
         self.tvh_uuid=tvh_uuid
         self.hls_uuid=clean_name(name)
         self.tvh_url=tvh_base_url_auth+"stream/channel/"+tvh_uuid
@@ -154,12 +156,12 @@ def tvhedend_get_tv_channellist():
             continue
         if not tv_tag is None and not tv_tag in channel["tags"]:
             continue
-        ch=TVChannel(name, tags, channel["uuid"])
+        ch=TVChannel(name, tags, channel["number"], channel["uuid"])
         channel_list.append(ch)
     channel_hash={}
     for ch in channel_list:
         channel_hash[ch.hls_uuid]=ch
-    return (sorted(channel_list, key=lambda x: x.name), channel_hash)
+    return (sorted(channel_list, key=lambda x: getattr(x, config["sort"])), channel_hash)
 
 end_program=0
 main_thread={}
