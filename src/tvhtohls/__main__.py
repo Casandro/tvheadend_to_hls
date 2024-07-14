@@ -149,7 +149,8 @@ def tvhedend_get_tv_channellist():
             tag_list=[]
             for t in channel["tags"]:
                 if t in channel_tags:
-                    tag_list.append(channel_tags[t])
+                    if t!=tv_tag:
+                        tag_list.append(channel_tags[t])
             tags="("+", ".join(tag_list)+")"
         channel["new_name"]=name
         if radio_tag in channel["tags"]:
