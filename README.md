@@ -7,6 +7,8 @@ Configure this via an '.env'-file:
 
 Example:
 
-```tvheadend_user=user
+```
+tvheadend_user=user
 tvheadend_pass=pass
-tvheadend_ip=ip```
+tvheadend_ip=ip
+```
