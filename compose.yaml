@@ -3,3 +3,7 @@ services:
     build: .
     ports:
       - "80:80"
+    environment:
+      tvheadend_user: ${tvheadend_user}
+      tvheadend_pass: ${tvheadend_pass}
+      tvheadend_ip: ${tvheadend_ip}

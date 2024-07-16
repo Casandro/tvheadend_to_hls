@@ -24,9 +24,9 @@ config["tvheadend_user"]="user"
 config["tvheadend_pass"]="pass"
 config["local_port"]=8888
 config["hls_local_path"]="/tmp/tvhtohls/hls"
-config["hls_http_path"]="/hls/"
+config["hls_http_path"]="hls/"
 config["static_local_path"]=pathlib.Path(__file__).parent / 'static'
-config["static_http_path"]="/static/"
+config["static_http_path"]="static/"
 config["sort"]="name" # or "number"
 
 for setting in config.keys():
@@ -275,9 +275,9 @@ async def read_stream(uuid: str=""):
 
 
 # for really static files, such as javascript, images etc
-app.mount(config["static_http_path"], StaticFiles(directory=config["static_local_path"]), name="static")
+app.mount("/"+config["static_http_path"], StaticFiles(directory=config["static_local_path"]), name="static")
 # HLS stream files which are dynamically generated
-app.mount(config["hls_http_path"], StaticFiles(directory=config["hls_local_path"]), name="hls")
+app.mount("/"+config["hls_http_path"], StaticFiles(directory=config["hls_local_path"]), name="hls")
 
 
 def check_status():
