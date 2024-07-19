@@ -188,7 +188,7 @@ async def read_root(s: str="", d: str="i"):
     data="<html><head><title>Channels</title></head>"
     data=data+"<body>"
     data=data+"<table>"
-    data=data+'<tr><th scope="col"><a href="?s=number">▲</a><a href="?s=number&d=d">▼</a></th><th scope="col">Name <a href="?s=namer">▲</a><a href="?s=name&d=d">▼</a></th></th><th scope="col">Tags</th> </tr>'
+    data=data+'<tr><th scope="col"><a href="?s=number">▲</a><a href="?s=number&d=d">▼</a></th><th scope="col">Name <a href="?s=name">▲</a><a href="?s=name&d=d">▼</a></th></th><th scope="col">Tags</th> </tr>'
     for service in cl_sorted:
         name=service.name
         tags=service.tags
