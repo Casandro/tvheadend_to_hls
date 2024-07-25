@@ -241,15 +241,19 @@ def player_page(uri: str="", name: str=""):
         hls.attachMedia(video);
         hls.on(Hls.Events.MEDIA_ATTACHED, function () {
           video.muted=true;
-          video.play();
+          setTimeout(startPlayer, 5000)
         });
       }
       else if (video.canPlayType('application/vnd.apple.mpegurl')) {
         video.src = '%s';
         video.addEventListener('canplay', function () {
           video.muted=true;
-          video.play();
+          setTimeout(startPlayer, 5000)
         });
+      }
+
+      function startPlayer() {
+        video.play()
       }
     </script>
 ''' % (html.escape(name),uri,uri)
