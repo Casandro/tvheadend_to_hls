@@ -103,11 +103,11 @@ class TVChannel:
             "-preset", "fast", 
             "-c:v", "libx264", "-b:v", "2M", 
             "-c:a", "aac", "-b:a", "96k",
-            "-filter:v", "scale=720:576",
+            "-filter:v", "yadif,scale=720:576",
             "-r", "25", "-sn",
             "-hls_flags", "delete_segments",
-            "-hls_list_size", "100",
-            "-hls_time", "2", "-hls_playlist_type", "event",self.m3u8_file], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+            "-hls_list_size", "10",
+            "-hls_time", "5", "-hls_playlist_type", "event",self.m3u8_file], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
         self.last_used=time.time()
         return False
     def clean_stream(self):
@@ -191,6 +191,8 @@ async def read_root(s: str="", d: str="i"):
     data=data+'<tr><th scope="col"><a href="?s=number">▲</a><a href="?s=number&d=d">▼</a></th><th scope="col">Name <a href="?s=name">▲</a><a href="?s=name&d=d">▼</a></th></th><th scope="col">Tags</th> </tr>'
     for service in cl_sorted:
         name=service.name
+        if service.stream:
+            name=name+" 👀"
         tags=service.tags
         uuid=service.hls_uuid
         number=str(service.number)
@@ -273,7 +275,7 @@ async def read_stream(uuid: str=""):
         return player_page(res, channel.name)
     data='<html><head><title>Bitte warten</title><meta http-equiv="refresh" content="1"></head>'
     data=data+"<body>"
-    data=data+"Bitte warten, Stream startet"
+    data=data+"Bitte warten, Stream startet. Das kann durchaus 30 Sekunden dauern"
     data=data+"</body></html>"
     return Response(content=data, media_type="text/html;charset=utf-8")
 
