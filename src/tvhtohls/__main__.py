@@ -169,19 +169,22 @@ class tv_channel_epg:
     def format_now_next(self):
         if self.now is None:
             return ""
-        self.update()
-        data=""
-        if self.now in self.events:
-            cur=self.events[self.now]
-            if "title" in cur:
-                data="<b>"+html.escape(cur["title"])+"</b>"
-            remaining=(cur["stop"]-time.time())/60
-            data=data+" {:9.1f} min".format(remaining)
-            if "nextEventId" in cur and cur["nextEventId"] in self.events:
-                nxt=self.events[cur["nextEventId"]]
-                if "title" in nxt:
-                    data=data+" <b>"+html.escape(nxt["title"])+"</b>"
-        return data
+        try:
+            self.update()
+            data=""
+            if self.now in self.events:
+                cur=self.events[self.now]
+                if "title" in cur:
+                    data="<b>"+html.escape(cur["title"])+"</b>"
+                remaining=(cur["stop"]-time.time())/60
+                data=data+" {:9.1f} min".format(remaining)
+                if "nextEventId" in cur and cur["nextEventId"] in self.events:
+                    nxt=self.events[cur["nextEventId"]]
+                    if "title" in nxt:
+                        data=data+" <b>"+html.escape(nxt["title"])+"</b>"
+            return data
+        except:
+            return "Error"
 
 
 def tvhedend_get_tv_channellist():
