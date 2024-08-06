@@ -196,6 +196,7 @@ async def read_root(s: str="", d: str="i"):
     cl_sorted=sorted(channel_list, key=lambda x: getattr(x, s), reverse=(d=='d'))
     data="<html><head><title>Channels</title></head>"
     data=data+"<body>"
+    data=data+"<h1>List of TV channels</h1>"
     data=data+"<table>"
     data=data+'<tr><th scope="col"><a href="?s=number">▲</a><a href="?s=number&d=d">▼</a></th><th scope="col">Name <a href="?s=name">▲</a><a href="?s=name&d=d">▼</a></th></th><th scope="col">Tags</th> </tr>'
     for service in cl_sorted:
@@ -291,7 +292,7 @@ async def read_stream(uuid: str=""):
         return player_page(res, channel.name)
     data='<html><head><title>Bitte warten</title><meta http-equiv="refresh" content="1"></head>'
     data=data+"<body>"
-    data=data+"Bitte warten, Stream startet. Das kann durchaus 30 Sekunden dauern. Diese Seite läd währenddessen immer wieder neu"
+    data=data+"Please wait while the stream is starting. This can take 30 seconds or more. This page will meanwhile reload."
     data=data+"</body></html>"
     return Response(content=data, media_type="text/html;charset=utf-8")
 
