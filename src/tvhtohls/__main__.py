@@ -153,7 +153,10 @@ class tv_channel_epg:
             return
         ev=self.events[self.now]
         if (ev["stop"]<time.time()):
-            n=ev["nextEventId"]
+            if "nextEventId" in ev:
+                n=ev["nextEventId"]
+            else:
+                n=None
             del self.events[self.now]
             if not (n is None) and n in self.events:
                 self.now=n
