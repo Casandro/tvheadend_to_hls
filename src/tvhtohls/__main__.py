@@ -129,6 +129,55 @@ class TVChannel:
         self.stream=None
         return True
 
+class tv_channel_epg:
+    def __init__(self, uuid, event_hash):
+        self.uuid=uuid
+        self.now=None
+        self.events={}
+        self.last_update=time.time()
+        self.add(event_hash)
+    def add(self, event_hash):
+        eventid=event_hash["eventId"]
+        event_hash["start"]=int(event_hash["start"])
+        event_hash["stop"]=int(event_hash["stop"])
+        stop=event_hash["stop"]
+        if stop<time.time():
+            return
+        self.events[eventid]=event_hash
+        if (self.now is None) or self.events[eventid]["start"]<self.events[self.now]["start"]:
+            self.now=eventid
+    def update(self):
+        if self.now is None:
+            return
+        if not (self.now in self.events):
+            return
+        ev=self.events[self.now]
+        if (ev["stop"]<time.time()):
+            n=ev["nextEventId"]
+            del self.events[self.now]
+            if not (n is None) and n in self.events:
+                self.now=n
+                return
+            epg_json=tvheadend_get(tvh_base_url+"/api/epg/events/grid?limit=10000&channel="+self.uuid)
+            for event in epg_json["entries"]:
+                channel_uuid=event["channelUuid"]
+                if channel_uuid==self.uuid:
+                    self.add(event)
+    def format_now_next(self):
+        if self.now is None:
+            return ""
+        self.update()
+        data=""
+        if self.now in self.events:
+            cur=self.events[self.now]
+            data="<b>"+html.escape(cur["title"])+"</b>"
+            remaining=(cur["stop"]-time.time())/60
+            data=data+" {:9.1f} min".format(remaining)
+            if "nextEventId" in cur and cur["nextEventId"] in self.events:
+                nxt=self.events[cur["nextEventId"]]
+                data=data+" <b>"+html.escape(nxt["title"])+"</b>"
+        return data
+
 
 def tvhedend_get_tv_channellist():
     #Get Data from tvheadend like channels and channel tags
@@ -171,7 +220,7 @@ def tvhedend_get_tv_channellist():
     channel_hash={}
     for ch in channel_list:
         channel_hash[ch.hls_uuid]=ch
-    return (sorted(channel_list, key=lambda x: getattr(x, config["sort"])), channel_hash)
+    return (sorted(channel_list, key=lambda x: getattr(x, config["sort"])), channel_hash, tv_tag)
 
 end_program=0
 main_thread={}
@@ -181,11 +230,23 @@ print("Getting service list from tvheadend")
 
 channel_list=[]
 channel_hash={}
+tv_tag=None
 
-(channel_list, channel_hash) = tvhedend_get_tv_channellist()
+(channel_list, channel_hash, tv_tag) = tvhedend_get_tv_channellist()
 
-        
+epg={}
+    
 print("%s channels for TV services" % len(channel_list))
+
+print("Getting EPG")
+epg_json=tvheadend_get(tvh_base_url+"/api/epg/events/grid?limit=10000&channelTag="+tv_tag)
+for event in epg_json["entries"]:
+    channel_uuid=event["channelUuid"]
+    if channel_uuid in epg:
+        epg[channel_uuid].add(event)
+    else:
+        epg[channel_uuid]=tv_channel_epg(channel_uuid, event)
+
 
 app = FastAPI()
 
@@ -198,17 +259,21 @@ async def read_root(s: str="", d: str="i"):
     data=data+"<body>"
     data=data+"<h1>List of TV channels</h1>"
     data=data+"<table>"
-    data=data+'<tr><th scope="col"><a href="?s=number">▲</a><a href="?s=number&d=d">▼</a></th><th scope="col">Name <a href="?s=name">▲</a><a href="?s=name&d=d">▼</a></th></th><th scope="col">Tags</th> </tr>'
+    data=data+'<tr><th scope="col"><a href="?s=number">▲</a><a href="?s=number&d=d">▼</a></th><th scope="col">Name <a href="?s=name">▲</a><a href="?s=name&d=d">▼</a></th></th><th scope="col">Now Next</th></tr>'
     for service in cl_sorted:
         name=service.name
         if service.stream:
             name=name+" 👀"
         tags=service.tags
         uuid=service.hls_uuid
+        if service.tvh_uuid in epg:
+            now_next=epg[service.tvh_uuid].format_now_next()
+        else:
+            now_next=""
         number=str(service.number)
         if number=="0":
             number=""
-        data=data+'<tr><td>'+html.escape(number)+'</td><td><a href="stream?uuid='+html.escape(uuid)+'" rel="nofollow">'+html.escape(name)+'</a></td><td>'+html.escape(tags)+'</td></tr>'
+        data=data+'<tr><td>'+html.escape(number)+'</td><td><a href="stream?uuid='+html.escape(uuid)+'" rel="nofollow">'+html.escape(name)+'</a></td><td>'+now_next+'</td></tr>'
     data=data+"</table>"
     data=data+"</body></html>"
     return Response(content=data, media_type="text/html;charset=utf-8")
