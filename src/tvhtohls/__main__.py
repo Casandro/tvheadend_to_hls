@@ -28,6 +28,7 @@ config["hls_http_path"]="hls/"
 config["static_local_path"]=pathlib.Path(__file__).parent / 'static'
 config["static_http_path"]="static/"
 config["sort"]="name" # or "number"
+config["segment_len"]=2
 
 for setting in config.keys():
     if setting in os.environ:
@@ -100,14 +101,21 @@ class TVChannel:
         #Start stream
         self.stream=subprocess.Popen(["/usr/bin/ffmpeg", "-i", self.tvh_url, "-probesize", "100000",
             "-f", "hls", "-g", "50", 
-            "-preset", "fast", 
-            "-c:v", "libx264", "-b:v", "2M", 
-            "-c:a", "aac", "-b:a", "96k",
-            "-filter:v", "yadif,scale=720:576",
+            "-preset", "veryfast", 
+            "-sc_threshold", "0", 
+            "-map", "v:0", "-c:v:0", "libx264", "-b:v:0", "200k",
+            "-map", "v:0", "-c:v:1", "libx264", "-b:v:1", "2000k",
+            "-map", "a:0", "-map", "a:0", "-c:a", "aac", "-b:a", "96k", "-ac", "2",
+            "-filter:v:1", "yadif,scale=720:576",
+            "-filter:v:0", "yadif,scale=512:288",
+            "-f", "hls",
             "-r", "25", "-sn",
             "-hls_flags", "delete_segments",
             "-hls_list_size", "10",
-            "-hls_time", "5", "-hls_playlist_type", "event",self.m3u8_file], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+            "-hls_time", str(config["segment_len"]), "-hls_playlist_type", "event",
+            "-master_pl_name", self.hls_uuid+".m3u8",
+            "-var_stream_map", "v:0,a:0, v:1,a:1", self.m3u8_file+"+%v"
+            ], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
         self.last_used=time.time()
         return False
     def clean_stream(self):
@@ -204,7 +212,7 @@ async def read_root(s: str="", d: str="i"):
     return Response(content=data, media_type="text/html;charset=utf-8")
 
 @app.get("/stream.m3u8")
-async def read_m3u8(uuid: str=""):
+async def read_m3u8(uuid: str="", stream_id: int=-1):
     if not uuid in channel_hash:
         return Response(content="NIX", media_type="text/plain;charset=utf-8")
     channel=channel_hash[uuid]
@@ -212,13 +220,20 @@ async def read_m3u8(uuid: str=""):
     if (res==False):
         return Response(content="NIX", media_type="text/plain;charset=utf-8")
 
+    suffix=""
+    if stream_id>=0:
+        suffix="+"+str(stream_id)
     data=""
-    m3u8=open(channel.m3u8_file , "r")
+    m3u8=open(channel.m3u8_file+suffix, "r")
     for line in m3u8.readlines():
-        if line[0]=="#":
-            data=data+line
-        else:
+        if line.find(".ts")>=0:
             data=data+config["hls_http_path"]+line
+            continue
+        if line.find(".m3u8+")>=0:
+            data=data+"stream.m3u8?uuid="+line.replace(".m3u8+", "&stream_id=")
+            continue
+        data=data+line
+
 
     return Response(content=data, media_type="text/plain;charset=utf-8")
 
@@ -275,7 +290,7 @@ async def read_stream(uuid: str=""):
         return player_page(res, channel.name)
     data='<html><head><title>Bitte warten</title><meta http-equiv="refresh" content="1"></head>'
     data=data+"<body>"
-    data=data+"Bitte warten, Stream startet. Das kann durchaus 30 Sekunden dauern"
+    data=data+"Bitte warten, Stream startet. Das kann durchaus 30 Sekunden dauern. Diese Seite läd währenddessen immer wieder neu"
     data=data+"</body></html>"
     return Response(content=data, media_type="text/html;charset=utf-8")
 
