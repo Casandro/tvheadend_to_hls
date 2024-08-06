@@ -173,12 +173,14 @@ class tv_channel_epg:
         data=""
         if self.now in self.events:
             cur=self.events[self.now]
-            data="<b>"+html.escape(cur["title"])+"</b>"
+            if "title" in cur:
+                data="<b>"+html.escape(cur["title"])+"</b>"
             remaining=(cur["stop"]-time.time())/60
             data=data+" {:9.1f} min".format(remaining)
             if "nextEventId" in cur and cur["nextEventId"] in self.events:
                 nxt=self.events[cur["nextEventId"]]
-                data=data+" <b>"+html.escape(nxt["title"])+"</b>"
+                if "title" in nxt:
+                    data=data+" <b>"+html.escape(nxt["title"])+"</b>"
         return data
 
 
