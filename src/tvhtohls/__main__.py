@@ -144,7 +144,7 @@ class tv_channel_epg:
         if stop<time.time():
             return
         self.events[eventid]=event_hash
-        if (self.now is None) or self.events[eventid]["start"]<self.events[self.now]["start"]:
+        if (self.now is None) or (not self.now in self.events) or self.events[eventid]["start"]<self.events[self.now]["start"]:
             self.now=eventid
     def update(self):
         if self.now is None:
