@@ -116,7 +116,7 @@ class TVChannel:
             "-hls_time", str(config["segment_len"]), "-hls_playlist_type", "event",
             "-master_pl_name", self.hls_uuid+".m3u8",
             "-var_stream_map", "v:0,a:0, v:1,a:1", self.m3u8_file+"+%v"
-            ], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+            ])#, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
         self.last_used=time.time()
         return False
     def clean_stream(self):
@@ -148,7 +148,7 @@ class tv_channel_epg:
             self.now=eventid
     def update(self):
         if self.now is None:
-            return
+            return False
         while self.now in self.events and (self.events[self.now]["stop"]<time.time()):
             ev=self.events[self.now]
             del self.events[self.now]
@@ -157,12 +157,14 @@ class tv_channel_epg:
             else:
                 self.now=None
         if self.now in self.events:
-            return 
-        epg_json=tvheadend_get(tvh_base_url+"/api/epg/events/grid?limit=10000&channel="+self.uuid)
+            return False
+        print("Getting fresh EPG for channel %s"%self.uuid)
+        epg_json=tvheadend_get(tvh_base_url+"/api/epg/events/grid?limit=10&channel="+self.uuid)
         for event in epg_json["entries"]:
             channel_uuid=event["channelUuid"]
             if channel_uuid==self.uuid:
                 self.add(event)
+        return True
     def format_now_next(self):
         if self.now is None:
             return ""
@@ -387,6 +389,11 @@ def check_status():
             if channel.stream.poll() is None:
                 continue
             channel.clean_stream()
+        for channel in channel_list:
+            uuid=channel.tvh_uuid
+            if not uuid in epg:
+                continue
+            epg[uuid].update()
         time.sleep(1)
 
 
