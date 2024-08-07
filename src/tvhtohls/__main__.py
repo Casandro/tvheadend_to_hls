@@ -149,23 +149,20 @@ class tv_channel_epg:
     def update(self):
         if self.now is None:
             return
-        if not (self.now in self.events):
-            return
-        ev=self.events[self.now]
-        if (ev["stop"]<time.time()):
-            if "nextEventId" in ev:
-                n=ev["nextEventId"]
-            else:
-                n=None
+        while self.now in self.events and (self.events[self.now]["stop"]<time.time()):
+            ev=self.events[self.now]
             del self.events[self.now]
-            if not (n is None) and n in self.events:
-                self.now=n
-                return
-            epg_json=tvheadend_get(tvh_base_url+"/api/epg/events/grid?limit=10000&channel="+self.uuid)
-            for event in epg_json["entries"]:
-                channel_uuid=event["channelUuid"]
-                if channel_uuid==self.uuid:
-                    self.add(event)
+            if "nextEventId" in ev:
+                self.now=ev["nextEventId"]
+            else:
+                self.now=None
+        if self.now in self.events:
+            return 
+        epg_json=tvheadend_get(tvh_base_url+"/api/epg/events/grid?limit=10000&channel="+self.uuid)
+        for event in epg_json["entries"]:
+            channel_uuid=event["channelUuid"]
+            if channel_uuid==self.uuid:
+                self.add(event)
     def format_now_next(self):
         if self.now is None:
             return ""
