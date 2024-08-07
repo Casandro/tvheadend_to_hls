@@ -3,11 +3,10 @@ FROM debian:bookworm
 WORKDIR /tvh_to_hls
 
 RUN apt-get update &&\
-	apt-get -y install python3 python3-pip python3-venv nginx ffmpeg
+	apt-get -y install python3 python3-uvicorn python3-fastapi python3-requests nginx ffmpeg
 
-COPY ./ ./
-RUN python3 -m venv venv
-RUN venv/bin/pip install .
+COPY ./src/tvhtohls/ ./
+COPY ./entrypoint.sh ./
 COPY nginx.conf /etc/nginx/nginx.conf
 
 EXPOSE 80/tcp
