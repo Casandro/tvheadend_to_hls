@@ -220,8 +220,8 @@ def tvhedend_get_tv_channellist():
         channel["new_name"]=name
         if radio_tag in channel["tags"]:
             continue
-        if not tv_tag is None and not tv_tag in channel["tags"]:
-            continue
+#        if not tv_tag is None and not tv_tag in channel["tags"]:
+#            continue
         ch=TVChannel(name, tags, channel["number"], channel["uuid"])
         channel_list.append(ch)
     channel_hash={}
@@ -246,7 +246,7 @@ epg={}
 print("%s channels for TV services" % len(channel_list))
 
 print("Getting EPG")
-epg_json=tvheadend_get(tvh_base_url+"/api/epg/events/grid?limit=10000&channelTag="+tv_tag)
+epg_json=tvheadend_get(tvh_base_url+"/api/epg/events/grid?limit=10000")
 for event in epg_json["entries"]:
     channel_uuid=event["channelUuid"]
     if channel_uuid in epg:
