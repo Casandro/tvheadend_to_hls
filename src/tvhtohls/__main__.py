@@ -109,7 +109,7 @@ class TVChannel:
             "-map", "a:0", "-map", "a:0","-map", "a:0","-c:a", "aac", "-b:a", "96k", "-ac", "2",
             "-filter:v:0", "yadif,scale=720:576",
             "-filter:v:1", "yadif,scale=512:288",
-            "-filter:v:1", "yadif,scale=256:144",
+            "-filter:v:2", "yadif,scale=256:144",
             "-f", "hls",
             "-r", "25", "-sn",
             "-hls_flags", "delete_segments",
