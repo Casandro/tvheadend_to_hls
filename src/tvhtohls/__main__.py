@@ -103,11 +103,13 @@ class TVChannel:
             "-f", "hls", "-g", "50", 
             "-preset", "veryfast", 
             "-sc_threshold", "0", 
-            "-map", "v:0", "-c:v:0", "libx264", "-b:v:0", "200k",
-            "-map", "v:0", "-c:v:1", "libx264", "-b:v:1", "2000k",
-            "-map", "a:0", "-map", "a:0", "-c:a", "aac", "-b:a", "96k", "-ac", "2",
-            "-filter:v:1", "yadif,scale=720:576",
-            "-filter:v:0", "yadif,scale=512:288",
+            "-map", "v:0", "-c:v:0", "libx264", "-b:v:0", "2000k",
+            "-map", "v:0", "-c:v:1", "libx264", "-b:v:1", "500k",
+            "-map", "v:0", "-c:v:2", "libx264", "-b:v:1", "100k",
+            "-map", "a:0", "-map", "a:0","-map", "a:0","-c:a", "aac", "-b:a", "96k", "-ac", "2",
+            "-filter:v:0", "yadif,scale=720:576",
+            "-filter:v:1", "yadif,scale=512:288",
+            "-filter:v:1", "yadif,scale=256:144",
             "-f", "hls",
             "-r", "25", "-sn",
             "-hls_flags", "delete_segments",
@@ -115,7 +117,7 @@ class TVChannel:
             "-hls_list_size", "10",
             "-hls_time", str(config["segment_len"]), "-hls_playlist_type", "event",
             "-master_pl_name", self.hls_uuid+".m3u8",
-            "-var_stream_map", "v:0,a:0, v:1,a:1", self.m3u8_file+"+%v"
+            "-var_stream_map", "v:0,a:0, v:1,a:1 v:2,a:2", self.m3u8_file+"+%v"
             ])#, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
         self.last_used=time.time()
         return False
