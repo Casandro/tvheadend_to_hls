@@ -113,6 +113,7 @@ class TVChannel:
             "-f", "hls",
             "-r", "25", "-sn",
             "-hls_flags", "delete_segments",
+            "-hls_flags", "independent_segments",
             "-hls_segment_filename", config["hls_local_path"]+"/"+self.hls_uuid+"_%v_%02d.ts",
             "-hls_list_size", "10",
             "-hls_time", str(config["segment_len"]), "-hls_playlist_type", "event",
