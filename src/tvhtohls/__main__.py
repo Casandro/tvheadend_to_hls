@@ -3,7 +3,7 @@ import pathlib
 
 import uvicorn
 import os
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, Response, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
 import requests
 from requests.auth import HTTPDigestAuth
@@ -28,7 +28,7 @@ config["hls_http_path"]="hls/"
 config["static_local_path"]=pathlib.Path(__file__).parent / 'static'
 config["static_http_path"]="static/"
 config["sort"]="name" # or "number"
-config["segment_len"]=2
+config["segment_len"]=5
 
 for setting in config.keys():
     if setting in os.environ:
@@ -100,16 +100,16 @@ class TVChannel:
                     return False
         #Start stream
         self.stream=subprocess.Popen(["/usr/bin/ffmpeg", "-i", self.tvh_url, "-probesize", "100000",
-            "-f", "hls", "-g", "50", 
+            "-f", "hls", 
             "-preset", "veryfast", 
             "-sc_threshold", "0", 
             "-map", "v:0", "-c:v:0", "libx264", "-b:v:0", "2000k",
             "-map", "v:0", "-c:v:1", "libx264", "-b:v:1", "500k",
-            "-map", "v:0", "-c:v:2", "libx264", "-b:v:1", "100k",
-            "-map", "a:0", "-map", "a:0","-map", "a:0","-c:a", "aac", "-b:a", "96k", "-ac", "2",
+  #          "-map", "v:0", "-c:v:2", "libx264", "-b:v:1", "100k",
+            "-map", "a:0", "-map", "a:0","-c:a", "aac", "-b:a", "96k", "-ac", "2",
             "-filter:v:0", "yadif,scale=720:576",
             "-filter:v:1", "yadif,scale=512:288",
-            "-filter:v:2", "yadif,scale=256:144",
+#            "-filter:v:2", "yadif,scale=256:144",
             "-f", "hls",
             "-r", "25", "-sn",
             "-hls_flags", "delete_segments",
@@ -118,7 +118,7 @@ class TVChannel:
             "-hls_list_size", "10",
             "-hls_time", str(config["segment_len"]), "-hls_playlist_type", "event",
             "-master_pl_name", self.hls_uuid+".m3u8",
-            "-var_stream_map", "v:0,a:0, v:1,a:1 v:2,a:2", self.m3u8_file+"+%v"
+            "-var_stream_map", "v:0,a:0, v:1,a:1 ", self.m3u8_file+"+%v"
             ])#, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
         self.last_used=time.time()
         return False
@@ -372,6 +372,11 @@ async def read_stream(uuid: str=""):
     return Response(content=data, media_type="text/html;charset=utf-8")
 
 
+@app.on_event("startup")
+def startup_event():
+    print("startup_event")
+    threading.Thread(target=check_status, daemon=True).start()
+
 # for really static files, such as javascript, images etc
 app.mount("/"+config["static_http_path"], StaticFiles(directory=config["static_local_path"]), name="static")
 # HLS stream files which are dynamically generated
@@ -381,7 +386,10 @@ app.mount("/"+config["hls_http_path"], StaticFiles(directory=config["hls_local_p
 def check_status():
     global main_thread
     global stream_ffmpeg
+    print("check_status starting")
     while main_thread.is_alive():
+        time.sleep(1)
+        print("Main_thread")
         for channel in channel_list:
             if channel.stream is None:
                 continue
@@ -397,14 +405,11 @@ def check_status():
             if not uuid in epg:
                 continue
             epg[uuid].update()
-        time.sleep(1)
 
 
 def main():
     global main_thread, end_program
-    main_thread=threading.currentThread()
-    x=threading.Thread(target=check_status, args=[])
-    x.start()
+    main_thread=threading.current_thread()
     uvicorn.run(app, port=8888, host="0.0.0.0", log_level="info")    
     print("Ending program")
     end_program=1
