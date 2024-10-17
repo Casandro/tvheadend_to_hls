@@ -386,25 +386,28 @@ app.mount("/"+config["hls_http_path"], StaticFiles(directory=config["hls_local_p
 def check_status():
     global main_thread
     global stream_ffmpeg
-    print("check_status starting")
+    print("check_status starting", flush=True)
     while main_thread.is_alive():
         time.sleep(1)
-        print("Main_thread")
-        for channel in channel_list:
-            if channel.stream is None:
-                continue
-            age=time.time()-channel.last_used
-            if (age>30):
-                channel.stream.kill()
-                time.sleep(1)
-            if channel.stream.poll() is None:
-                continue
-            channel.clean_stream()
-        for channel in channel_list:
-            uuid=channel.tvh_uuid
-            if not uuid in epg:
-                continue
-            epg[uuid].update()
+        try:
+            print("Main_thread")
+            for channel in channel_list:
+                if channel.stream is None:
+                    continue
+                age=time.time()-channel.last_used
+                if (age>30):
+                    channel.stream.kill()
+                    time.sleep(1)
+                if channel.stream.poll() is None:
+                    continue
+                channel.clean_stream()
+            for channel in channel_list:
+                uuid=channel.tvh_uuid
+                if not uuid in epg:
+                    continue
+                epg[uuid].update()
+        except:
+            print("Exception raised, continuing", flush=True)
 
 
 def main():
