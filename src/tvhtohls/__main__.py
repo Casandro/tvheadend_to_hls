@@ -98,18 +98,41 @@ class TVChannel:
             else:
                 if self.stream.poll() is None:
                     return False
+        codecs=[
+#                ["libx264", "3000k", "yadif,scale='min(1280,iw)':'min(720,ih)'"],
+                ["libx264", "2000k", "yadif,scale='min(720,iw)':'min(576,ih)'"],
+                ["libx264", "500k",  "yadif,scale=512:288"],
+                ["libx264", "256k",  "yadif,scale=320:240"],
+                ["libx264", "128k",  "yadif,scale=256:144"],
+                ["copy",    None, None]
+               ]
+        cnt=0
+        codec_params=[]
+        var_stream_map=""
+        for c in codecs:
+            codec_params.append("-map")
+            codec_params.append("v:0?")
+            codec_params.append("-c:v:%s" % cnt)
+            codec_params.append(c[0])
+            if not c[1] is None:
+                codec_params.append("-b:v:%s" % cnt)
+                codec_params.append(c[1])
+            if not c[2] is None:
+                codec_params.append("-filter:v:%s" % (cnt))
+                codec_params.append(c[2])
+            var_stream_map=var_stream_map+"v:%s,a:%s, " %(cnt, cnt)
+            cnt=cnt+1
+        print(codec_params)
+        acodec_params=[]
+        for c in codecs:
+            acodec_params.append("-map") 
+            acodec_params.append("a:0")
         #Start stream
         self.stream=subprocess.Popen(["/usr/bin/ffmpeg", "-i", self.tvh_url, "-probesize", "100000",
             "-f", "hls", 
             "-preset", "veryfast", 
-            "-sc_threshold", "0", 
-            "-map", "v:0", "-c:v:0", "libx264", "-b:v:0", "2000k",
-            "-map", "v:0", "-c:v:1", "libx264", "-b:v:1", "500k",
-  #          "-map", "v:0", "-c:v:2", "libx264", "-b:v:1", "100k",
-            "-map", "a:0", "-map", "a:0","-c:a", "aac", "-b:a", "96k", "-ac", "2",
-            "-filter:v:0", "yadif,scale=720:576",
-            "-filter:v:1", "yadif,scale=512:288",
-#            "-filter:v:2", "yadif,scale=256:144",
+            "-sc_threshold", "0"] + codec_params + acodec_params +
+            ["-c:a", "aac", "-b:a", "96k", "-ac", "2",
             "-f", "hls",
             "-r", "25", "-sn",
             "-hls_flags", "delete_segments",
@@ -118,7 +141,7 @@ class TVChannel:
             "-hls_list_size", "10",
             "-hls_time", str(config["segment_len"]), "-hls_playlist_type", "event",
             "-master_pl_name", self.hls_uuid+".m3u8",
-            "-var_stream_map", "v:0,a:0, v:1,a:1 ", self.m3u8_file+"+%v"
+            "-var_stream_map", var_stream_map, self.m3u8_file+"+%v"
             ])#, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
         self.last_used=time.time()
         return False
