@@ -3,7 +3,13 @@ services:
     build: .
     ports:
       - "80:80"
-    environment:
-      tvheadend_user: ${tvheadend_user}
-      tvheadend_pass: ${tvheadend_pass}
-      tvheadend_ip: ${tvheadend_ip}
+    # Forwards the entire .env file (including any top_channels_<name> entries).
+    env_file:
+      - .env
+    # GPU passthrough for VAAPI (Intel/AMD). The Python side auto-detects
+    # /dev/dri/renderD128 and uses it when available. Hosts without /dev/dri
+    # must delete the next two stanzas (devices + group_add) before `up`.
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - video

@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.scripts]
-tvhtohls = "tvhtohls.__main__:main"
+tvhtohls = "tvhtohls.app:main"
 
 [project.urls]
 Home = "https://github.com/Casandro/tvheadend_to_hls/"
