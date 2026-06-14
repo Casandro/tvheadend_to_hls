@@ -221,7 +221,7 @@ async def read_epg(uuid: str = ""):
         "<html><head><title>EPG: " + title + "</title>"
         + _PAGE_STYLE +
         "</head>"
-        '<body><a href="/">‹ channels</a>'
+        '<body><a href="./">‹ channels</a>'
         "<h1>EPG: " + title + "</h1>"
     )
     if entries:
@@ -317,7 +317,7 @@ def player_page(uri: str = "", name: str = "", channel_uuid: str = ""):
     data += '<br><a href="%s">URL for use with VLC</a>' % uri
     if channel_uuid:
         data += ' &middot; <a href="epg?uuid=%s">EPG</a>' % html.escape(channel_uuid)
-        data += ' &middot; <a href="..">‹ all channels</a>'
+        data += ' &middot; <a href="./">‹ all channels</a>'
     data += "</body>"
 
     return Response(content=data, media_type="text/html;charset=utf-8")
