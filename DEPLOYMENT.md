@@ -93,6 +93,7 @@ Environment variables — same set as a local `.env` file:
 | `tvheadend_user` | your TVHeadend username |
 | `tvheadend_pass` | your TVHeadend password |
 | `tvheadend_ip` | TVHeadend host IP |
+| `tvheadend_servers` (optional) | JSON array of `{"name","ip","port","user","pass"}` objects — use instead of the three settings above to combine several TVHeadend servers into one channel list (see README) |
 | `top_channels` (optional) | comma-separated UUIDs |
 | `top_channels_<name>` (optional) | extra named pin lists |
 | `hwaccel` (optional) | `auto` (default), `vaapi`, or `none` |

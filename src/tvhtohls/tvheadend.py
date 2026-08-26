@@ -1,66 +1,39 @@
-"""TVHeadend API client + the channel/EPG domain objects."""
+"""TVHeadend API access: per-server snapshots, channel merging, EPG feeds."""
+import concurrent.futures
 import time
 
-import requests
-from requests.auth import HTTPDigestAuth
-
-from .config import config, tvh_base_url
+from .config import config
 from .flags import guess_country, service_av
-from .streams import TVChannel
-
-
-# requests has no default timeout: without one, a slow/unresponsive TVHeadend
-# hangs this call forever. Since check_status's background loop is single
-# threaded, a hung EPG refetch for any one channel freezes the idle-kill sweep
-# for every channel, so ffmpeg never gets stopped even when nothing accessed
-# its playlist.
-TVHEADEND_TIMEOUT = 10
-
-
-def tvheadend_get(url):
-    """GET a TVHeadend JSON endpoint and return the parsed body."""
-    req = requests.get(
-        url,
-        auth=HTTPDigestAuth(config["tvheadend_user"], config["tvheadend_pass"]),
-        timeout=TVHEADEND_TIMEOUT,
-    )
-    req.encoding = "UTF-8"
-    if req.status_code != 200:
-        print("TVHeadend %s returned HTTP %s" % (url, req.status_code))
-        raise SystemExit(1)
-    return req.json()
-
-
-# Deduplication counter for clean_name(): tracks how many times a sanitized
-# name has been seen so collisions get a "-N" suffix.
-_clean_name_counter = {}
-
-
-def clean_name(name):
-    """Sanitize a channel name to a filename-safe ID, de-duplicating collisions."""
-    out = "".join(
-        c if ("A" <= c <= "Z" or "0" <= c <= "9") else ("_" if c == " " else "")
-        for c in name.upper()
-    )
-    if len(out) < 2:
-        out = "INVALID"
-    seen = _clean_name_counter.get(out, 0) + 1
-    _clean_name_counter[out] = seen
-    return out if seen == 1 else "%s-%d" % (out, seen)
+from .match import (
+    ChannelSource, assign_hls_uuids, build_mux_index, group_channels,
+    resolve_mux, service_identity,
+)
+from .server import STARTUP_READ_TIMEOUT, TVHError
+from .streams import StreamSource, TVChannel
 
 
 class tv_channel_epg:
+    """The EPG for one merged channel, fed from exactly one server.
+
+    Events are *not* pooled across servers: `_upcoming()` walks TVHeadend's
+    `nextEventId` chain, and those ids are per-instance counters, so mixing two
+    servers' events either truncates the listing or jumps to an unrelated
+    programme.
+    """
+
     # When a flagged channel has run dry, don't refetch from TVHeadend more
     # often than this (seconds) — the background loop ticks every second and we
     # don't want to hammer the server while it genuinely has no fresh events.
     REFETCH_INTERVAL = 3600
 
-    def __init__(self, uuid, event_hash):
+    def __init__(self, server, uuid, event_hash=None):
+        self.server = server
         self.uuid = uuid
         self.now = None
         self.events = {}
         self.last_fetch = time.time()
-        self.add(event_hash)
+        if event_hash is not None:
+            self.add(event_hash)
 
     def add(self, event_hash):
         eventid = event_hash["eventId"]
@@ -96,12 +69,10 @@ class tv_channel_epg:
         return self.now is not None
 
     def refetch(self, n=20):
-        """Fetch fresh EPG events for this channel from TVHeadend."""
+        """Fetch fresh EPG events for this channel from its server."""
         self.last_fetch = time.time()  # set first so the throttle holds even on error
-        epg_json = tvheadend_get(
-            tvh_base_url
-            + "/api/epg/events/grid?limit=" + str(max(n, 20))
-            + "&channel=" + self.uuid
+        epg_json = self.server.get(
+            "api/epg/events/grid?limit=%d&channel=%s" % (max(n, 20), self.uuid)
         )
         for event in epg_json["entries"]:
             if event["channelUuid"] == self.uuid:
@@ -159,24 +130,6 @@ def _should_skip(name):
     return False
 
 
-def _load_services_by_uuid():
-    """Map service UUID → service record (for provider lookup). Empty dict if unavailable."""
-    try:
-        grid = tvheadend_get(tvh_base_url + "/api/mpegts/service/grid?limit=99999")
-        return {s["uuid"]: s for s in grid["entries"]}
-    except (Exception, SystemExit):
-        return {}
-
-
-def _load_tags():
-    """Return (channel_tags_by_uuid, tv_tag_uuid, radio_tag_uuid)."""
-    grid = tvheadend_get(tvh_base_url + "/api/channeltag/list")
-    tags_by_uuid = {t["key"]: t["val"] for t in grid["entries"]}
-    tv_tag = next((k for k, v in tags_by_uuid.items() if v == "TV channels"), None)
-    radio_tag = next((k for k, v in tags_by_uuid.items() if v == "Radio channels"), None)
-    return tags_by_uuid, tv_tag, radio_tag
-
-
 def _channel_providers(channel, services_by_uuid):
     """Sorted-unique provider strings across the channel's linked services."""
     return sorted({
@@ -186,48 +139,227 @@ def _channel_providers(channel, services_by_uuid):
     })
 
 
-def tvheadend_get_channel_list():
-    """Fetch every TV channel from TVHeadend, build TVChannel objects with country/provider info.
+def _tags(tag_entries):
+    """Return (tags_by_uuid, tv_tag_uuid, radio_tag_uuid) from /api/channeltag/list."""
+    tags_by_uuid = {t["key"]: t["val"] for t in tag_entries}
+    tv_tag = next((k for k, v in tags_by_uuid.items() if v == "TV channels"), None)
+    radio_tag = next((k for k, v in tags_by_uuid.items() if v == "Radio channels"), None)
+    return tags_by_uuid, tv_tag, radio_tag
 
-    Returns (sorted_channel_list, by_hls_uuid).
+
+class ServerSnapshot:
+    """Everything we read from one server at startup."""
+
+    def __init__(self, server, channels, services_by_uuid, mux_index, tags_by_uuid,
+                 tv_tag, radio_tag, epg_by_channel, identity_available):
+        self.server = server
+        self.channels = channels
+        self.services_by_uuid = services_by_uuid
+        self.mux_index = mux_index
+        self.tags_by_uuid = tags_by_uuid
+        self.tv_tag = tv_tag
+        self.radio_tag = radio_tag
+        self.epg_by_channel = epg_by_channel
+        self.identity_available = identity_available
+
+
+def _entries(server, path, what, optional=True):
+    """GET `path` and return its "entries" list; [] plus a log line on failure."""
+    try:
+        return server.get(path, read_timeout=STARTUP_READ_TIMEOUT)["entries"]
+    except (TVHError, KeyError, TypeError) as e:
+        if optional:
+            print("%s: %s unavailable (%s)" % (server.name, what, e))
+            return []
+        raise TVHError(str(e))
+
+
+def fetch_server_snapshot(server):
+    """Read one server's channels, services, muxes, tags and bulk EPG.
+
+    Never raises: a server that can't produce a channel list is reported and
+    skipped, and every other endpoint degrades to empty so a stream-only API
+    account (no rights on /api/mpegts/*) still yields a usable channel list.
     """
-    channels = tvheadend_get(tvh_base_url + "/api/channel/grid?limit=99999")["entries"]
-    services_by_uuid = _load_services_by_uuid()
-    channel_tags, tv_tag, radio_tag = _load_tags()
+    try:
+        channels = _entries(server, "api/channel/grid?limit=99999",
+                            "channel grid", optional=False)
+    except TVHError as e:
+        print("%s: channel list unavailable (%s) — skipping this server" % (server.name, e))
+        return None
 
-    channel_list = []
-    for channel in channels:
-        name = channel["name"]
+    services = _entries(server, "api/mpegts/service/grid?limit=99999", "service grid")
+    services_by_uuid = {s["uuid"]: s for s in services if s.get("uuid")}
+    muxes = _entries(server, "api/mpegts/mux/grid?limit=99999", "mux grid")
+    tag_entries = _entries(server, "api/channeltag/list", "channel tags")
+    if not tag_entries:
+        print("%s: no channel tags — radio channels can't be identified "
+              "(include_radio filtering disabled for this server)" % server.name)
+    tags_by_uuid, tv_tag, radio_tag = _tags(tag_entries)
+
+    epg_by_channel = {}
+    for event in _entries(server, "api/epg/events/grid?limit=10000", "EPG grid"):
+        uuid = event.get("channelUuid")
+        if uuid:
+            epg_by_channel.setdefault(uuid, []).append(event)
+
+    print("%s: %d channels, %d services, %d muxes, %d EPG feeds, identity=%s"
+          % (server.name, len(channels), len(services), len(muxes), len(epg_by_channel),
+             "yes" if services and muxes else ("sid-only" if services else "no")))
+
+    return ServerSnapshot(
+        server, channels, services_by_uuid, build_mux_index(muxes),
+        tags_by_uuid, tv_tag, radio_tag, epg_by_channel,
+        identity_available=bool(services),
+    )
+
+
+def fetch_snapshots(servers):
+    """Snapshot every server in parallel, preserving the configured order.
+
+    Parallel because a dead server costs several connect timeouts, which would
+    otherwise delay startup for the servers that *are* up.
+    """
+    if len(servers) == 1:
+        return [s for s in (fetch_server_snapshot(servers[0]),) if s is not None]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(servers)) as pool:
+        results = list(pool.map(fetch_server_snapshot, servers))
+    return [r for r in results if r is not None]
+
+
+def _identities(channel, snapshot):
+    """DVB identities for every service the channel is mapped to."""
+    out = []
+    for su in channel.get("services") or []:
+        service = snapshot.services_by_uuid.get(su)
+        if not service:
+            continue
+        out.append(service_identity(service, resolve_mux(service, snapshot.mux_index)))
+    return tuple(out)
+
+
+def build_channel_sources(snapshot):
+    """One ChannelSource per usable channel on this server."""
+    sources = []
+    for channel in snapshot.channels:
+        name = channel.get("name") or ""
         if _should_skip(name):
             continue
         tag_ids = channel.get("tags") or []
-        is_radio = radio_tag is not None and radio_tag in tag_ids
+        is_radio = snapshot.radio_tag is not None and snapshot.radio_tag in tag_ids
         if is_radio and not config["include_radio"]:
             continue
 
         tag_display_names = []
         non_tv_tag_names = []  # tag display names except the umbrella "TV channels" tag
         for t in tag_ids:
-            display = channel_tags.get(t)
+            display = snapshot.tags_by_uuid.get(t)
             if display is None:
                 continue
             tag_display_names.append(display)
-            if t != tv_tag:
+            if t != snapshot.tv_tag:
                 non_tv_tag_names.append(display)
         tags = "(" + ", ".join(non_tv_tag_names) + ")" if non_tv_tag_names else ""
 
-        providers = _channel_providers(channel, services_by_uuid)
+        providers = _channel_providers(channel, snapshot.services_by_uuid)
         provider = ", ".join(providers) if providers else None
-        country = guess_country(channel, services_by_uuid, tag_display_names, provider=provider)
+        country = guess_country(
+            channel, snapshot.services_by_uuid, tag_display_names, provider=provider)
         # Synthesize a dummy video only with positive evidence of audio-without-video
         # (or an explicit Radio tag). Unknown metadata → treat as a normal TV channel.
-        has_video, has_audio = service_av(channel, services_by_uuid)
+        has_video, has_audio = service_av(channel, snapshot.services_by_uuid)
         audio_only = is_radio or (has_video is False and has_audio)
-        channel_list.append(TVChannel(
-            name, tags, channel["number"], channel["uuid"], clean_name(name),
-            country=country, provider=provider, audio_only=audio_only,
-        ))
 
-    by_hls_uuid = {ch.hls_uuid: ch for ch in channel_list}
-    channel_list.sort(key=lambda x: getattr(x, config["sort"]))
-    return channel_list, by_hls_uuid
+        sources.append(ChannelSource(
+            channel["uuid"], name,
+            server=snapshot.server,
+            number=channel.get("number"),
+            tags=tags,
+            tag_names=tag_display_names,
+            country=country,
+            provider=provider,
+            audio_only=audio_only,
+            is_radio=is_radio,
+            identities=_identities(channel, snapshot),
+            epg_events=snapshot.epg_by_channel.get(channel["uuid"], ()),
+        ))
+    return sources
+
+
+def _epg_source(group):
+    """The source whose EPG we use: richest first, ties to the earlier server."""
+    return max(group, key=lambda s: (len(s.epg_fp), len(s.epg_events), -s.server_order))
+
+
+def build_merged_channels(groups):
+    """Turn source groups into TVChannel objects plus their EPG feeds.
+
+    Returns (channel_list, epg_by_hls_uuid).
+    """
+    hls_uuids = assign_hls_uuids(groups)
+    channels = []
+    epg = {}
+    for group, hls_uuid in zip(groups, hls_uuids):
+        primary = group[0]
+        sources = [
+            StreamSource(s.server, s.tvh_uuid, s.server.stream_url(s.tvh_uuid), s.audio_only)
+            for s in group
+        ]
+        channel = TVChannel(
+            primary.name, primary.tags, primary.number, hls_uuid, sources,
+            country=primary.country, provider=primary.provider,
+        )
+        channels.append(channel)
+
+        feed_source = _epg_source(group)
+        if feed_source.epg_events:
+            feed = tv_channel_epg(feed_source.server, feed_source.tvh_uuid)
+            for event in feed_source.epg_events:
+                feed.add(event)
+            if feed.has_events():
+                epg[hls_uuid] = feed
+                channel.had_epg = True
+
+        numbers = {str(s.number) for s in group if s.number and str(s.number) != "0"}
+        if len(numbers) > 1:
+            print("note   number-mismatch %-24s %s" % (
+                '"%s"' % primary.name, ", ".join(sorted(numbers))))
+
+    channels.sort(key=lambda x: getattr(x, config["sort"]))
+    return channels, epg
+
+
+def _log_decision(kind, a, b, m):
+    print("%-6s %-16s %-26s %s + %s  (%s)" % (
+        kind, m.label, '"%s"' % a.name[:24], a.label, b.label, m.detail))
+
+
+def load_channels(servers):
+    """Fetch every server, merge duplicate channels, build the served state.
+
+    Returns (channel_list, by_hls_uuid, epg_by_hls_uuid).
+    """
+    snapshots = fetch_snapshots(servers)
+    if not snapshots:
+        print("No TVHeadend server returned a channel list — check the configuration")
+        raise SystemExit(1)
+
+    sources = []
+    for snapshot in snapshots:
+        sources.extend(build_channel_sources(snapshot))
+
+    groups = group_channels(sources, log=_log_decision if len(snapshots) > 1 else None)
+    channels, epg = build_merged_channels(groups)
+
+    if len(snapshots) > 1:
+        per_server = {}
+        for group in groups:
+            for s in group:
+                per_server[s.server_name] = per_server.get(s.server_name, 0) + 1
+        print("dedup: %d sources -> %d channels (%d collapsed); %s" % (
+            len(sources), len(channels), len(sources) - len(channels),
+            ", ".join("%s %d" % (n, c) for n, c in sorted(per_server.items())) or "-",
+        ))
+    print("Loaded %d TV channels, %d with EPG" % (len(channels), len(epg)))
+
+    return channels, {ch.hls_uuid: ch for ch in channels}, epg

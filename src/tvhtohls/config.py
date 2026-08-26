@@ -1,3 +1,4 @@
+import json
 import os
 import pathlib
 
@@ -59,6 +60,11 @@ config["num_streams"] = max(1, int(os.environ.get("num_streams", "4")))
 config["include_radio"] = os.environ.get("include_radio", "").lower() in (
     "1", "true", "yes", "on"
 )
+# Diagnostic: print the multi-server channel merge report at startup and exit
+# before uvicorn (and before any ffmpeg) is started.
+config["merge_report_only"] = os.environ.get("merge_report_only", "").lower() in (
+    "1", "true", "yes", "on"
+)
 config["dummy_video_size"] = os.environ.get("dummy_video_size", "320x180")
 config["dummy_video_fps"] = int(os.environ.get("dummy_video_fps", "10"))
 config["dummy_video_bitrate"] = _parse_bitrate(os.environ.get("dummy_video_bitrate", "64k"))
@@ -100,17 +106,70 @@ if not os.path.isdir(config["hls_local_path"]):
     raise SystemExit(1)
 
 
-tvh_base_url = (
-    "http://" + config["tvheadend_ip"] + ":" + config["tvheadend_port"] + "/"
-)
-tvh_base_url_auth = (
-    "http://"
-    + config["tvheadend_user"]
-    + ":"
-    + config["tvheadend_pass"]
-    + "@"
-    + config["tvheadend_ip"]
-    + ":"
-    + config["tvheadend_port"]
-    + "/"
-)
+def _server_entry(raw, index):
+    """Normalize one `tvheadend_servers` entry. Exits with a clear message if unusable."""
+    if not isinstance(raw, dict):
+        print("tvheadend_servers[%d]: expected a JSON object, got %r" % (index, raw))
+        raise SystemExit(1)
+    ip = str(raw.get("ip") or raw.get("host") or "").strip()
+    if not ip:
+        print('tvheadend_servers[%d]: missing "ip"' % index)
+        raise SystemExit(1)
+    user = raw.get("user")
+    password = raw.get("pass") if raw.get("pass") is not None else raw.get("password")
+    if not user or password is None:
+        print('tvheadend_servers[%d] (%s): missing "user" and/or "pass"' % (index, ip))
+        raise SystemExit(1)
+    return {
+        "name": str(raw.get("name") or ip).strip() or ip,
+        "ip": ip,
+        "port": str(raw.get("port") or "9981").strip(),
+        "user": str(user),
+        "pass": str(password),
+    }
+
+
+def _unique_names(servers):
+    """Server names are log labels and `server:uuid` keys — make them unique."""
+    seen = {}
+    for s in servers:
+        n = seen.get(s["name"], 0) + 1
+        seen[s["name"]] = n
+        if n > 1:
+            s["name"] = "%s-%d" % (s["name"], n)
+    return servers
+
+
+# Multi-server support is opt-in: `tvheadend_servers` (a JSON array) is used only
+# when it is set and non-empty. Otherwise the legacy flat tvheadend_ip/port/user/pass
+# variables define the one and only server, exactly as before. The two formats are
+# never mixed — a malformed `tvheadend_servers` is a hard error rather than a silent
+# fallback to the flat vars, which would quietly stream from the wrong server.
+_raw_servers = os.environ.get("tvheadend_servers", "").strip()
+if _raw_servers:
+    try:
+        _parsed = json.loads(_raw_servers)
+    except ValueError as _e:
+        print("tvheadend_servers: not valid JSON (%s)" % _e)
+        print("  expected e.g. [{\"name\":\"attic\",\"ip\":\"10.0.0.5\",\"user\":\"u\",\"pass\":\"p\"}]")
+        raise SystemExit(1)
+    if not isinstance(_parsed, list) or not _parsed:
+        print("tvheadend_servers: expected a non-empty JSON array of objects")
+        raise SystemExit(1)
+    config["servers"] = _unique_names(
+        [_server_entry(s, i) for i, s in enumerate(_parsed)]
+    )
+else:
+    config["servers"] = [{
+        "name": str(config["tvheadend_ip"]),
+        "ip": str(config["tvheadend_ip"]),
+        "port": str(config["tvheadend_port"]),
+        "user": str(config["tvheadend_user"]),
+        "pass": str(config["tvheadend_pass"]),
+    }]
+
+# Log the servers we ended up with (never the passwords) so a misquoted .env shows up.
+print("tvheadend: %d server(s): %s" % (
+    len(config["servers"]),
+    ", ".join("%s(%s:%s)" % (s["name"], s["ip"], s["port"]) for s in config["servers"]),
+))

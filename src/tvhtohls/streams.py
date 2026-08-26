@@ -1,11 +1,13 @@
+import ctypes
 import math
 import os
 import re
+import signal
 import subprocess
 import time
 import traceback
 
-from .config import config, tvh_base_url_auth
+from .config import config
 from .flags import flag_emoji
 
 
@@ -170,41 +172,180 @@ def build_audio_only_command(channel):
     ] + _hls_tail(channel, "v:0,a:0, ")
 
 
+# Ask the kernel to kill our ffmpeg children if we die without being able to do
+# it ourselves ("kill -9", OOM, a crash). Without this they keep running, keep a
+# TVHeadend tuner busy and keep writing segments nobody serves.
+_PR_SET_PDEATHSIG = 1
+try:
+    _prctl = ctypes.CDLL("libc.so.6", use_errno=True).prctl
+except (OSError, AttributeError):      # non-Linux / no glibc: fall back to cleanup only
+    _prctl = None
+
+
+def _die_with_parent():
+    """Child-side pre-exec hook: SIGKILL this child when the app goes away.
+
+    The kernel ties this to the *thread* that forked, which here is always the
+    uvicorn main thread (playlist requests run in it), i.e. the process lifetime.
+    Survives the exec into ffmpeg.
+
+    Runs in the forked child before exec, which is the documented (and slightly
+    risky) preexec_fn window: it does one prctl(2) syscall and nothing else. If
+    it ever did wedge, the start deadline in start_stream() reaps that ffmpeg and
+    the channel fails over, so the failure mode is self-healing.
+    """
+    if _prctl is not None:
+        _prctl(_PR_SET_PDEATHSIG, signal.SIGKILL)
+
+
+IDLE_TIMEOUT = 30            # kill ffmpeg after this many seconds without a request
+SOURCE_COOLDOWN = 300        # skip a source for this long after it failed
+# Startup deadlines. Tuning a transponder, waiting for lock, PAT/PMT and the
+# first keyframe can take well over 20 s on a real receiver, so the "is this
+# ffmpeg stuck?" test is progress-based: a source with no free tuner sends no
+# bytes at all, so nothing lands on disk. Once segments appear we only need to
+# wait for the master playlist.
+START_DEADLINE = 45          # seconds to produce any output at all
+PLAYLIST_DEADLINE = 90       # seconds from the first segment to the master playlist
+RETRY_INTERVAL = 15          # min seconds between attempts once every source has failed
+
+
+class StreamSource:
+    """One server's copy of a channel: where to pull it from, and how healthy it is."""
+
+    def __init__(self, server, tvh_uuid, url, audio_only=False):
+        self.server = server
+        self.tvh_uuid = tvh_uuid
+        self.url = url
+        # Audio-only is per source: a server with no stream metadata classifies the
+        # same channel as normal TV, and the two need different ffmpeg pipelines.
+        self.audio_only = audio_only
+        self.cooldown_until = 0.0
+        self.fail_count = 0
+
+    @property
+    def label(self):
+        return "%s:%s" % (getattr(self.server, "name", "?"), self.tvh_uuid)
+
+    def __repr__(self):
+        return "<StreamSource %s>" % self.label
+
+
 class TVChannel:
-    def __init__(self, name, tags, number, tvh_uuid, hls_uuid, *,
-                 country=None, provider=None, audio_only=False):
+    """One channel as served: one HLS id, one ffmpeg, N interchangeable sources."""
+
+    def __init__(self, name, tags, number, hls_uuid, sources, *,
+                 country=None, provider=None):
         self.name = name
         self.tags = tags
         self.number = number
-        self.tvh_uuid = tvh_uuid
         self.hls_uuid = hls_uuid
+        # Ordered by configured server priority: index 0 is tried first, the rest
+        # are failover targets.
+        self.sources = list(sources)
+        self.source_index = 0
         self.country = country
         self.flag = flag_emoji(country)
         self.provider = provider
-        # Audio-only (radio etc.): start_stream synthesizes a dummy video track.
-        self.audio_only = audio_only
         # Set once the channel is seen to have EPG (at startup or later). Flagged
         # channels get fresh EPG fetched when they run out of events; channels
         # that never had EPG are left alone so we don't poll TVHeadend for nothing.
         self.had_epg = False
-        self.tvh_url = tvh_base_url_auth + "stream/channel/" + tvh_uuid
         self.m3u8_file = config["hls_local_path"] + "/" + self.hls_uuid + ".m3u8"
         self.stream = None
+        self.stream_started_at = None
         self.last_used = time.time()
+        self.last_attempt = 0.0
         self.clean_stream()
+
+    @property
+    def source(self):
+        return self.sources[self.source_index]
+
+    @property
+    def tvh_uuid(self):
+        return self.source.tvh_uuid
+
+    @property
+    def tvh_url(self):
+        return self.source.url
+
+    @property
+    def audio_only(self):
+        return self.source.audio_only
+
+    def _pick_source(self, now):
+        """Index of the highest-priority source that isn't cooling down."""
+        for i, s in enumerate(self.sources):
+            if s.cooldown_until <= now:
+                return i
+        # Everything failed recently — retry whichever recovers first.
+        return min(range(len(self.sources)),
+                   key=lambda i: self.sources[i].cooldown_until)
+
+    def _has_output(self):
+        """True once ffmpeg has written a segment or playlist for this channel."""
+        try:
+            entries = os.listdir(config["hls_local_path"])
+        except OSError:
+            return False
+        for f in entries:
+            if f.endswith(".txt"):
+                continue        # the drawtext name file — we write that ourselves
+            if _owns_file(self.hls_uuid, f):
+                return True
+        return False
+
+    def startup_failure(self, now):
+        """Why to give up on the running ffmpeg, or None while it may still work."""
+        waited = now - (self.stream_started_at or now)
+        if self._has_output():
+            if waited > PLAYLIST_DEADLINE:
+                return "no playlist within %ds" % PLAYLIST_DEADLINE
+            return None
+        if waited > START_DEADLINE:
+            return "no data within %ds" % START_DEADLINE
+        return None
+
+    def fail_source(self, reason):
+        """Retire the current source for a while and tear its ffmpeg down."""
+        source = self.source
+        source.fail_count += 1
+        source.cooldown_until = time.time() + SOURCE_COOLDOWN
+        print("stream %s: source %s failed (%s); skipping it for %ds"
+              % (self.hls_uuid, source.label, reason, SOURCE_COOLDOWN))
+        # Reap before deleting files, so a dying ffmpeg can't write one more
+        # segment after the cleanup.
+        self.stop_stream()
 
     def start_stream(self):
         self.last_used = time.time()
         if self.stream:
             if os.path.isfile(self.m3u8_file):
                 return "stream.m3u8?uuid=" + self.hls_uuid
-            else:
-                if self.stream.poll() is None:
+            if self.stream.poll() is None:
+                reason = self.startup_failure(self.last_used)
+                if reason is None:
                     return False
+                # A TVHeadend with no free tuner answers the HTTP request and then
+                # sends nothing, so ffmpeg neither exits nor writes a playlist.
+                self.fail_source(reason)
+            else:
                 # ffmpeg exited before producing a playlist; clean up before respawn
-                self.clean_stream()
+                self.fail_source("exited before playlist")
 
-        if self.audio_only:
+        now = time.time()
+        self.source_index = self._pick_source(now)
+        source = self.source
+        if source.cooldown_until > now and now - self.last_attempt < RETRY_INTERVAL:
+            # Every source failed recently. Still retry eventually — the failure may
+            # have been a busy tuner — but not once per two-second player poll.
+            return False
+        self.last_attempt = now
+        if len(self.sources) > 1:
+            print("stream %s: starting from %s" % (self.hls_uuid, source.label))
+
+        if source.audio_only:
             # drawtext reads the channel name from this file (textfile=).
             with open(config["hls_local_path"] + "/" + self.hls_uuid + ".txt", "w") as f:
                 f.write(self.name)
@@ -213,7 +354,7 @@ class TVChannel:
             hwaccel_args, video_args, n_outputs, var_stream_map = build_codecs()
             acodec_params = ["-map", "a:0"] * n_outputs
             cmd = ["/usr/bin/ffmpeg"] + hwaccel_args + [
-                "-i", self.tvh_url,
+                "-i", source.url,
                 "-preset", "veryfast",
                 "-sc_threshold", "0",
                 # Force a keyframe every 25 frames (~1 s at 25 fps) so the HLS muxer
@@ -225,9 +366,21 @@ class TVChannel:
                 "-r", "25",
             ] + _hls_tail(self, var_stream_map)
 
-        self.stream = subprocess.Popen(cmd)
-        self.last_used = time.time()
+        self.stream = subprocess.Popen(cmd, preexec_fn=_die_with_parent)
+        self.stream_started_at = time.time()
+        self.last_used = self.stream_started_at
         return False
+
+    def stop_stream(self):
+        """Stop ffmpeg (if any) and remove this channel's files."""
+        if self.stream is not None:
+            if self.stream.poll() is None:
+                self.stream.kill()
+            try:
+                self.stream.wait(timeout=5)
+            except Exception:
+                pass
+        self.clean_stream()
 
     def clean_stream(self):
         base = config["hls_local_path"]
@@ -238,6 +391,7 @@ class TVChannel:
                 except OSError:
                     pass
         self.stream = None
+        self.stream_started_at = None
 
 
 ORPHAN_SWEEP_INTERVAL = 60   # seconds between directory-wide orphan sweeps
@@ -285,8 +439,21 @@ def _sweep_orphan_files(channel_list):
             pass
 
 
+def kill_all_streams(channel_list):
+    """Stop every running ffmpeg and clean up. Called when the app shuts down."""
+    running = [ch for ch in channel_list if ch.stream is not None]
+    if not running:
+        return
+    print("shutdown: stopping %d ffmpeg process(es)" % len(running))
+    for channel in running:
+        try:
+            channel.stop_stream()
+        except Exception:
+            traceback.print_exc()
+
+
 def check_status(channel_list, epg, main_thread):
-    """Background thread: kill ffmpeg processes idle >30s and keep EPG fresh."""
+    """Background thread: reap idle/failed ffmpeg processes and keep EPG fresh."""
     tick = 0
     while main_thread.is_alive():
         time.sleep(1)
@@ -295,14 +462,30 @@ def check_status(channel_list, epg, main_thread):
             for channel in channel_list:
                 if channel.stream is None:
                     continue
-                if time.time() - channel.last_used > 30:
-                    channel.stream.kill()
-                    time.sleep(1)
-                if channel.stream.poll() is None:
+                now = time.time()
+                wanted = now - channel.last_used <= IDLE_TIMEOUT
+                alive = channel.stream.poll() is None
+                if alive and wanted:
+                    if not os.path.isfile(channel.m3u8_file):
+                        # Hung ffmpeg (typically a busy tuner): retire the source so
+                        # the next request fails over instead of waiting forever.
+                        reason = channel.startup_failure(now)
+                        if reason:
+                            channel.fail_source(reason)
+                    continue
+                if alive:
+                    # Nobody is watching any more: stop and reap it.
+                    channel.stop_stream()
+                    continue
+                if wanted:
+                    # Exited while someone was still watching: blame the source.
+                    channel.fail_source(
+                        "died mid-stream" if os.path.isfile(channel.m3u8_file)
+                        else "exited before playlist")
                     continue
                 channel.clean_stream()
             for channel in channel_list:
-                feed = epg.get(channel.tvh_uuid)
+                feed = epg.get(channel.hls_uuid)
                 if feed is None:
                     continue
                 if feed.has_events():

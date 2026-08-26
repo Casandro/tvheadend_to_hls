@@ -1,54 +1,46 @@
+import atexit
 import html
 import json
+import signal
 import threading
 
 import uvicorn
 from fastapi import FastAPI, Query, Response
 from fastapi.staticfiles import StaticFiles
 
-from .config import config, tvh_base_url
+from .config import config
 from .flags import country_name, flag_emoji
-from .streams import check_status
-from .tvheadend import tv_channel_epg, tvheadend_get, tvheadend_get_channel_list
+from .server import build_servers
+from .streams import check_status, kill_all_streams
+from .tvheadend import load_channels, tv_channel_epg
 
 
 # Globally accessible state populated by load_state() at startup.
 channel_list = []
 channel_hash = {}      # hls_uuid → TVChannel
-tvh_uuid_hash = {}     # tvh_uuid → TVChannel
-epg = {}               # tvh_uuid → tv_channel_epg
+tvh_uuid_hash = {}     # tvh_uuid and "server:tvh_uuid" → TVChannel (every source)
+epg = {}               # hls_uuid → tv_channel_epg
 main_thread = None
 
 
 def load_state():
-    """Fetch channels + EPG from TVHeadend and populate the module-level state dicts."""
-    channels, by_hls_uuid = tvheadend_get_channel_list()
+    """Fetch channels + EPG from every configured TVHeadend and populate the state dicts."""
+    channels, by_hls_uuid, feeds = load_channels(build_servers(config["servers"]))
     channel_list[:] = channels
     channel_hash.clear()
     channel_hash.update(by_hls_uuid)
+
+    # Every source's uuid resolves to its merged channel, so top_channels entries
+    # keep working whichever server they were copied from. The "server:uuid" form
+    # is there for the (unlikely) case of the same uuid on two servers.
     tvh_uuid_hash.clear()
-    tvh_uuid_hash.update({ch.tvh_uuid: ch for ch in channel_list})
-    print("Loaded %d TV channels" % len(channel_list))
+    for channel in channel_list:
+        for source in channel.sources:
+            tvh_uuid_hash.setdefault(source.tvh_uuid, channel)
+            tvh_uuid_hash["%s:%s" % (source.server.name, source.tvh_uuid)] = channel
 
     epg.clear()
-    epg_json = tvheadend_get(tvh_base_url + "/api/epg/events/grid?limit=10000")
-    for event in epg_json["entries"]:
-        channel_uuid = event["channelUuid"]
-        if channel_uuid in epg:
-            epg[channel_uuid].add(event)
-        else:
-            epg[channel_uuid] = tv_channel_epg(channel_uuid, event)
-    print("Loaded %d EPG channel feeds" % len(epg))
-
-    # Flag every channel that has EPG at startup. The background loop refetches
-    # fresh events for flagged channels once they run out.
-    flagged = 0
-    for channel in channel_list:
-        feed = epg.get(channel.tvh_uuid)
-        if feed is not None and feed.has_events():
-            channel.had_epg = True
-            flagged += 1
-    print("Flagged %d channels as EPG-bearing" % flagged)
+    epg.update(feeds)
 
 
 app = FastAPI()
@@ -99,7 +91,7 @@ def _render_channel_block(service, n_entries=3):
     if service.number and str(service.number) != "0":
         out += " <small>#" + html.escape(str(service.number)) + "</small>"
     out += "</h3>"
-    entries = epg[service.tvh_uuid].get_entries(n_entries) if service.tvh_uuid in epg else []
+    entries = epg[uuid].get_entries(n_entries) if uuid in epg else []
     if entries:
         out += "<table>"
         for ev in entries:
@@ -149,9 +141,16 @@ async def read_root(list_name: str = Query("", alias="list")):
         top_uuids = config["top_channels"]
         active = ""
 
-    pinned = [tvh_uuid_hash[u] for u in top_uuids if u in tvh_uuid_hash]
-    pinned_set = {ch.tvh_uuid for ch in pinned}
-    rest = [c for c in channel_list if c.tvh_uuid not in pinned_set]
+    # Several pinned uuids can now resolve to the same merged channel — keep the
+    # first occurrence only, in the order given.
+    pinned = []
+    pinned_set = set()
+    for u in top_uuids:
+        channel = tvh_uuid_hash.get(u)
+        if channel is not None and channel.hls_uuid not in pinned_set:
+            pinned.append(channel)
+            pinned_set.add(channel.hls_uuid)
+    rest = [c for c in channel_list if c.hls_uuid not in pinned_set]
     rest_sorted = sorted(rest, key=lambda x: x.name.lower())
     grouped = _group_by_country(rest_sorted)
 
@@ -213,22 +212,26 @@ async def read_epg(uuid: str = ""):
     if uuid not in channel_hash:
         return Response(content="NIX", media_type="text/plain;charset=utf-8")
     channel = channel_hash[uuid]
-    tvh_uuid = channel.tvh_uuid
-    if tvh_uuid not in epg:
-        try:
-            epg_json = tvheadend_get(
-                tvh_base_url + "/api/epg/events/grid?limit=50&channel=" + tvh_uuid
-            )
-            for event in epg_json["entries"]:
-                if event["channelUuid"] != tvh_uuid:
-                    continue
-                if tvh_uuid in epg:
-                    epg[tvh_uuid].add(event)
-                else:
-                    epg[tvh_uuid] = tv_channel_epg(tvh_uuid, event)
-        except Exception:
-            pass
-    entries = epg[tvh_uuid].get_entries(50) if tvh_uuid in epg else []
+    if uuid not in epg:
+        # No feed yet: ask each server that carries this channel, in priority
+        # order, and keep the first one that actually has events.
+        for source in channel.sources:
+            try:
+                epg_json = source.server.get(
+                    "api/epg/events/grid?limit=50&channel=" + source.tvh_uuid
+                )
+                for event in epg_json["entries"]:
+                    if event["channelUuid"] != source.tvh_uuid:
+                        continue
+                    if uuid in epg:
+                        epg[uuid].add(event)
+                    else:
+                        epg[uuid] = tv_channel_epg(source.server, source.tvh_uuid, event)
+            except Exception:
+                continue
+            if uuid in epg:
+                break
+    entries = epg[uuid].get_entries(50) if uuid in epg else []
     title = html.escape(channel.name) + ((" " + channel.flag) if channel.flag else "")
     data = (
         "<html><head><title>EPG: " + title + "</title>"
@@ -371,6 +374,12 @@ def startup_event():
     ).start()
 
 
+@app.on_event("shutdown")
+def shutdown_event():
+    """Take every ffmpeg down with us — uvicorn runs this on SIGTERM/SIGINT."""
+    kill_all_streams(channel_list)
+
+
 app.mount(
     "/" + config["static_http_path"],
     StaticFiles(directory=config["static_local_path"]),
@@ -383,8 +392,30 @@ app.mount(
 )
 
 
+def _terminate(signum, frame):
+    """Stop the ffmpeg children, then exit.
+
+    Only reached when uvicorn is not the one handling the signal (it installs its
+    own SIGTERM/SIGINT handlers and triggers the shutdown event above); this
+    covers startup, the merge-report run, and any signal in between.
+    """
+    kill_all_streams(channel_list)
+    raise SystemExit(128 + signum)
+
+
 def main():
     global main_thread
     main_thread = threading.current_thread()
+    # Belt and braces around the FastAPI shutdown hook: a normal exit or an
+    # unhandled exception must not leave ffmpeg processes behind either. (A
+    # SIGKILL can't be caught at all — the children carry PR_SET_PDEATHSIG for
+    # that case.)
+    atexit.register(kill_all_streams, channel_list)
+    for _sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(_sig, _terminate)
     load_state()
+    if config["merge_report_only"]:
+        # Diagnostic run: the merge report is already printed, stop before serving
+        # anything (and before any ffmpeg could be spawned).
+        return
     uvicorn.run(app, port=8888, host="0.0.0.0", log_level="info")
